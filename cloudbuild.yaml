@@ -1,0 +1,65 @@
+# Build + deploy de ms_core_answercode a Cloud Run.
+#
+# Replica el build que antes estaba en línea en el trigger (qam-core-answercode).
+# El deploy usa `run services update --image` a propósito: solo cambia la imagen y
+# las labels, y conserva las variables de entorno, secretos, service account y
+# escalado ya configurados en el servicio (nada sensible vive en este repo).
+#
+# Para prem (rama master) el trigger debe sobreescribir _SERVICE_NAME=prem-core-answercode.
+
+steps:
+  # Build
+  - id: Build
+    name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'build'
+      - '--no-cache'
+      - '-t'
+      - '${_AR_HOSTNAME}/${_AR_PROJECT_ID}/${_AR_REPOSITORY}/${REPO_NAME}/${_SERVICE_NAME}:${COMMIT_SHA}'
+      - '-f'
+      - 'Dockerfile'
+      - '.'
+
+  # Push a Artifact Registry
+  - id: Push
+    name: 'gcr.io/cloud-builders/docker'
+    args:
+      - 'push'
+      - '${_AR_HOSTNAME}/${_AR_PROJECT_ID}/${_AR_REPOSITORY}/${REPO_NAME}/${_SERVICE_NAME}:${COMMIT_SHA}'
+
+  # Deploy a Cloud Run
+  - id: Deploy
+    name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'services'
+      - 'update'
+      - '${_SERVICE_NAME}'
+      - '--platform=managed'
+      - '--image=${_AR_HOSTNAME}/${_AR_PROJECT_ID}/${_AR_REPOSITORY}/${REPO_NAME}/${_SERVICE_NAME}:${COMMIT_SHA}'
+      - '--labels=managed-by=gcp-cloud-build-deploy-cloud-run,commit-sha=${COMMIT_SHA},gcb-build-id=${BUILD_ID},gcb-trigger-id=${_TRIGGER_ID}'
+      - '--region=${_DEPLOY_REGION}'
+      - '--quiet'
+
+images:
+  - '${_AR_HOSTNAME}/${_AR_PROJECT_ID}/${_AR_REPOSITORY}/${REPO_NAME}/${_SERVICE_NAME}:${COMMIT_SHA}'
+
+# Defaults = QA. El trigger sobreescribe estos valores (ya los tiene definidos).
+substitutions:
+  _SERVICE_NAME: qam-core-answercode
+  _AR_HOSTNAME: us-central1-docker.pkg.dev
+  _AR_PROJECT_ID: pre-qa-functions
+  _AR_REPOSITORY: cloud-run-source-deploy
+  _DEPLOY_REGION: us-central1
+  _PLATFORM: managed
+  _TRIGGER_ID: manual
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  substitutionOption: ALLOW_LOOSE
+
+tags:
+  - gcp-cloud-build-deploy-cloud-run
+  - gcp-cloud-build-deploy-cloud-run-managed
+  - ms-core-answercode
