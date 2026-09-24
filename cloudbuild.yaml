@@ -6,6 +6,23 @@
 # escalado ya configurados en el servicio (nada sensible vive en este repo).
 #
 # Para prem (rama master) el trigger debe sobreescribir _SERVICE_NAME=prem-core-answercode.
+#
+# DOS FORMAS DE EJECUTARLO
+#  1) Trigger de Cloud Build (GitHub): rellena solo ${REPO_NAME} y ${COMMIT_SHA}.
+#  2) Directo desde Azure DevOps (`gcloud builds submit`, sin repo conectado): ver
+#     .azure-pipeline.yml y ci/deploy-cloudrun-wif.yml. Ahi NO hay trigger, asi que el
+#     pipeline pasa por --substitutions TODO lo que este archivo espera:
+#       REPO_NAME, COMMIT_SHA, _SERVICE_NAME, _AR_PROJECT_ID, _AR_REPOSITORY,
+#       _DEPLOY_REGION y _TRIGGER_ID (ado-<BuildId>, queda como label del servicio).
+#
+# REQUISITOS
+#  - El servicio de Cloud Run debe existir (este archivo hace 'services update').
+#  - La SA que ejecuta el build (deploy-sa) necesita: escribir en el Artifact Registry,
+#    roles/run.developer, actuar como la SA de runtime del servicio y leer el bucket de
+#    staging <proyecto>_cloudbuild.
+#
+# PRODUCCION (rama main, proyecto produccion-functions): _AR_PROJECT_ID=produccion-functions,
+# _AR_REPOSITORY=cloud-run-images y _SERVICE_NAME=<servicio de prod>; los pasa el pipeline.
 
 steps:
   # Build
