@@ -76,9 +76,9 @@ jobs:
                   parameters:
                     serviceConnection: gcp-produccion-functions
                     projectId: produccion-functions
-                    serviceName: prod-core-answercode        # [CONFIRMAR] nombre real del servicio en prod
+                    serviceName: prod-core-answercode        # confirmado: lo crea Infra (01-crear-servicio.sh)
                     arProjectId: produccion-functions
-                    arRepository: cloud-run-images           # [CONFIRMAR] repo de Artifact Registry de prod
+                    arRepository: cloud-run-images           # confirmado: el mismo repo de prod-ia-liquidador
 
   # ============================================================
   # dev y master: puente a GitHub, SIN CAMBIOS
