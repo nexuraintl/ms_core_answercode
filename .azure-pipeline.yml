@@ -1,4 +1,27 @@
-# .azure-pipelines.yml
+# .azure-pipeline.yml — ms_core_answercode
+#
+# Despliegue por rama:
+#   qa      -> Cloud Run QA          (pre-qa-functions)     via WIF, directo, sin GitHub
+#   main    -> Cloud Run PRODUCCION  (produccion-functions) via WIF, directo, sin GitHub,
+#              con aprobacion manual (Environment 'produccion')
+#   dev, master -> SIN CAMBIOS: puente a GitHub (comportamiento anterior)
+#
+# Autenticacion: Workload Identity Federation (sin llaves) con la extension
+# "Google Cloud Auth" (GcpWifAuth@0). Los pasos estan en ci/deploy-cloudrun-wif.yml.
+# Se usa la rama completa (Build.SourceBranch) y no solo su ultimo tramo, para que una
+# rama como 'feature/main' NO dispare el despliegue de produccion.
+#
+# PRERREQUISITOS de la rama 'main' (produccion) -- ver el manual de produccion-functions:
+#   1. Federacion configurada en produccion-functions por Infra (script + verify).
+#   2. Service connection 'gcp-produccion-functions' creada en ESTE proyecto de ADO
+#      (Nexura Platform IA), con Branch control (solo main) y sin acceso a "todos los
+#      pipelines".
+#   3. Environment 'produccion' en ADO con aprobacion manual.
+#   4. El servicio de Cloud Run de produccion YA existe, con sus variables de entorno y
+#      secretos (AZURE_PAT, GEMINI_API_KEY, ...): cloudbuild.yaml solo actualiza la imagen.
+#   5. El Artifact Registry indicado abajo existe y deploy-sa puede escribir en el.
+# Hasta que estos puntos esten listos, NO fusionar este archivo a 'main' (un push a main
+# dispara este pipeline).
 
 trigger:
   branches:
@@ -6,6 +29,7 @@ trigger:
       - dev
       - qa
       - master
+      - main
 
 pool:
   vmImage: ubuntu-latest
@@ -14,111 +38,153 @@ variables:
   GIT_USER: $(Build.RequestedFor)
   GIT_EMAIL: $(Build.RequestedForEmail)
 
-  # Organización GitHub destino
+  # Organizacion GitHub destino (solo puente dev/master)
   GITHUB_ORG: "nexuraintl"
 
-  # Rama actual
+  # Rama actual (solo puente dev/master)
   BRANCH_NAME: $(Build.SourceBranchName)
 
-steps:
+jobs:
 
-  # 1️⃣ Checkout completo
-  - checkout: self
-    clean: true
-    persistCredentials: true
-    fetchDepth: 0
+  # ============================================================
+  # QA: despliegue directo por WIF
+  # ============================================================
+  - ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/qa') }}:
+      - job: DeployQA
+        displayName: 'Desplegar a QA (WIF, sin GitHub)'
+        steps:
+          - template: ci/deploy-cloudrun-wif.yml
+            parameters:
+              serviceConnection: gcp-pre-qa-functions
+              projectId: pre-qa-functions
+              serviceName: qam-core-answercode
+              arProjectId: pre-qa-functions
+              arRepository: cloud-run-source-deploy
 
-  # 2️⃣ Configuración Git
-  - script: |
-      echo "Configurando Git..."
+  # ============================================================
+  # PRODUCCION: despliegue directo por WIF, con aprobacion
+  # ============================================================
+  - ${{ if eq(variables['Build.SourceBranch'], 'refs/heads/main') }}:
+      - deployment: DeployProd
+        displayName: 'Desplegar a PRODUCCION (WIF, sin GitHub)'
+        environment: produccion            # el Environment lleva la aprobacion manual
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - template: ci/deploy-cloudrun-wif.yml
+                  parameters:
+                    serviceConnection: gcp-produccion-functions
+                    projectId: produccion-functions
+                    serviceName: prod-core-answercode        # [CONFIRMAR] nombre real del servicio en prod
+                    arProjectId: produccion-functions
+                    arRepository: cloud-run-images           # [CONFIRMAR] repo de Artifact Registry de prod
 
-      git config --global user.name "$(GIT_USER)"
-      git config --global user.email "$(GIT_EMAIL)"
+  # ============================================================
+  # dev y master: puente a GitHub, SIN CAMBIOS
+  # ============================================================
+  - ${{ if in(variables['Build.SourceBranch'], 'refs/heads/dev', 'refs/heads/master') }}:
+      - job: SyncGitHub
+        displayName: 'Sincronizar con GitHub (puente)'
+        steps:
 
-      echo "Usuario Git configurado:"
-      git config --global user.name
-      git config --global user.email
-    displayName: "Configurar Git"
+          # 1️⃣ Checkout completo
+          - checkout: self
+            clean: true
+            persistCredentials: true
+            fetchDepth: 0
 
-  # 3️⃣ Detectar nombre del repo dinámicamente
-  - script: |
-      echo "Repositorio detectado desde ADO:"
-      echo "$(Build.Repository.Name)"
+          # 2️⃣ Configuración Git
+          - script: |
+              echo "Configurando Git..."
 
-      # Si viene tipo Proyecto/repo -> obtiene solo repo
-      REPO_NAME=$(basename "$(Build.Repository.Name)")
+              git config --global user.name "$(GIT_USER)"
+              git config --global user.email "$(GIT_EMAIL)"
 
-      echo "Nombre final repo:"
-      echo "$REPO_NAME"
+              echo "Usuario Git configurado:"
+              git config --global user.name
+              git config --global user.email
+            displayName: "Configurar Git"
 
-      # Guardar variable para siguientes steps
-      echo "##vso[task.setvariable variable=REPO_NAME]$REPO_NAME"
-    displayName: "Detectar nombre repo"
+          # 3️⃣ Detectar nombre del repo dinámicamente
+          - script: |
+              echo "Repositorio detectado desde ADO:"
+              echo "$(Build.Repository.Name)"
 
-  # 4️⃣ Validar existencia repo GitHub
-  - script: |
-      echo "Validando existencia del repo GitHub..."
+              # Si viene tipo Proyecto/repo -> obtiene solo repo
+              REPO_NAME=$(basename "$(Build.Repository.Name)")
 
-      GITHUB_URL="https://$(GITHUB_TOKEN_NEXURAINTL)@github.com/$(GITHUB_ORG)/$(REPO_NAME).git"
+              echo "Nombre final repo:"
+              echo "$REPO_NAME"
 
-      echo "Repo destino:"
-      echo "https://github.com/$(GITHUB_ORG)/$(REPO_NAME).git"
+              # Guardar variable para siguientes steps
+              echo "##vso[task.setvariable variable=REPO_NAME]$REPO_NAME"
+            displayName: "Detectar nombre repo"
 
-      git ls-remote "$GITHUB_URL" > /dev/null 2>&1
+          # 4️⃣ Validar existencia repo GitHub
+          - script: |
+              echo "Validando existencia del repo GitHub..."
 
-      if [ $? -ne 0 ]; then
-        echo "======================================="
-        echo "ERROR: El repo NO existe en GitHub"
-        echo "Repo esperado:"
-        echo "$(GITHUB_ORG)/$(REPO_NAME)"
-        echo "======================================="
-        exit 1
-      fi
+              GITHUB_URL="https://$(GITHUB_TOKEN_NEXURAINTL)@github.com/$(GITHUB_ORG)/$(REPO_NAME).git"
 
-      echo "Repo GitHub validado correctamente"
-    env:
-      GITHUB_TOKEN_NEXURAINTL: $(GITHUB_TOKEN_NEXURAINTL)
-    displayName: "Validar repo GitHub"
+              echo "Repo destino:"
+              echo "https://github.com/$(GITHUB_ORG)/$(REPO_NAME).git"
 
-  # 5️⃣ Sincronizar rama hacia GitHub
-  - script: |
-      echo "Sincronizando repo..."
-      echo "Repo: $(REPO_NAME)"
-      echo "Rama: $(BRANCH_NAME)"
+              git ls-remote "$GITHUB_URL" > /dev/null 2>&1
 
-      GITHUB_URL="https://$(GITHUB_TOKEN_NEXURAINTL)@github.com/$(GITHUB_ORG)/$(REPO_NAME).git"
+              if [ $? -ne 0 ]; then
+                echo "======================================="
+                echo "ERROR: El repo NO existe en GitHub"
+                echo "Repo esperado:"
+                echo "$(GITHUB_ORG)/$(REPO_NAME)"
+                echo "======================================="
+                exit 1
+              fi
 
-      echo "Actualizando remotos..."
+              echo "Repo GitHub validado correctamente"
+            env:
+              GITHUB_TOKEN_NEXURAINTL: $(GITHUB_TOKEN_NEXURAINTL)
+            displayName: "Validar repo GitHub"
 
-      git remote add github "$GITHUB_URL" || true
-      git remote set-url github "$GITHUB_URL"
+          # 5️⃣ Sincronizar rama hacia GitHub
+          - script: |
+              echo "Sincronizando repo..."
+              echo "Repo: $(REPO_NAME)"
+              echo "Rama: $(BRANCH_NAME)"
 
-      echo "Remotos configurados:"
-      git remote -v
+              GITHUB_URL="https://$(GITHUB_TOKEN_NEXURAINTL)@github.com/$(GITHUB_ORG)/$(REPO_NAME).git"
 
-      echo "Actualizando referencias..."
-      git fetch --all
+              echo "Actualizando remotos..."
 
-      echo "Push hacia GitHub..."
+              git remote add github "$GITHUB_URL" || true
+              git remote set-url github "$GITHUB_URL"
 
-      git push github HEAD:$(BRANCH_NAME) --force -v
+              echo "Remotos configurados:"
+              git remote -v
 
-      PUSH_STATUS=$?
+              echo "Actualizando referencias..."
+              git fetch --all
 
-      if [ $PUSH_STATUS -ne 0 ]; then
-        echo "======================================="
-        echo "ERROR: Falló sincronización con GitHub"
-        echo "Repo: $(REPO_NAME)"
-        echo "Rama: $(BRANCH_NAME)"
-        echo "======================================="
-        exit 1
-      fi
+              echo "Push hacia GitHub..."
 
-      echo "======================================="
-      echo "Sincronización completada"
-      echo "Repo: $(REPO_NAME)"
-      echo "Rama: $(BRANCH_NAME)"
-      echo "======================================="
-    env:
-      GITHUB_TOKEN_NEXURAINTL: $(GITHUB_TOKEN_NEXURAINTL)
-    displayName: "Sincronizar con GitHub"
+              git push github HEAD:$(BRANCH_NAME) --force -v
+
+              PUSH_STATUS=$?
+
+              if [ $PUSH_STATUS -ne 0 ]; then
+                echo "======================================="
+                echo "ERROR: Falló sincronización con GitHub"
+                echo "Repo: $(REPO_NAME)"
+                echo "Rama: $(BRANCH_NAME)"
+                echo "======================================="
+                exit 1
+              fi
+
+              echo "======================================="
+              echo "Sincronización completada"
+              echo "Repo: $(REPO_NAME)"
+              echo "Rama: $(BRANCH_NAME)"
+              echo "======================================="
+            env:
+              GITHUB_TOKEN_NEXURAINTL: $(GITHUB_TOKEN_NEXURAINTL)
+            displayName: "Sincronizar con GitHub"
